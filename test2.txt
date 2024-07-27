@@ -238,3 +238,39 @@ new_env = PackingEnvironment(new_cuboid_dimensions, new_items)
 inference_reward, positions_rotations = run_inference(new_env, model)
 print(f"Inference Total Reward: {inference_reward}")
 print(f"Positions and Rotations: {positions_rotations}")
+
+
+def create_cuboid_vertices(start, size):
+    x, y, z = start
+    dx, dy, dz = size
+
+    vertices = [
+        [(x, y, z), (x+dx, y, z), (x+dx, y+dy, z), (x, y+dy, z)], # Bottom
+        [(x, y, z+dz), (x+dx, y, z+dz), (x+dx, y+dy, z+dz), (x, y+dy, z+dz)], # Top
+        [(x, y, z), (x, y, z+dz), (x, y+dy, z+dz), (x, y+dy, z)],
+        [(x+dx, y, z), (x+dx, y, z+dz), (x+dx, y+dy, z+dz), (x+dx, y+dy, z)],
+        [(x, y, z), (x+dx, y, z), (x+dx, y, z+dz), (x, y, z+dz)],
+        [(x, y+dy, z), (x+dx, y+dy, z), (x+dx, y+dy, z+dz), (x, y+dy, z+dz)]
+    ]
+    return vertices
+
+
+def plot_cuboid(cuboid_dimensions, items, positions):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+
+    for item, position in zip(items, positions):
+        vertices = create_cuboid_vertices(position, item)
+        cuboid = Poly3DCollection(vertices, alpha=0.25, linewidth=1, edgecolors='r')
+        cuboid.set_facecolor((np.random.rand(), np.random.rand(), np.random.rand(), 0.1))
+        ax.add_collection3d(cuboid)
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+
+    ax.set_xlim(0, cuboid_dimensions[0])
+    ax.set_ylim(0, cuboid_dimensions[1])
+    ax.set_zlim(0, cuboid_dimensions[2])
+
+    plt.show()
