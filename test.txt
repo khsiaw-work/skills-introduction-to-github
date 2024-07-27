@@ -33,7 +33,7 @@ class PackingEnvironment:
 
     def _get_state(self):
         if self.done or self.current_item_index >= len(self.items):
-            return np.zeros(np.prod(self.cuboid_dimensions) + 6)  # Update to 6 for rotations
+            return np.zeros(np.prod(self.cuboid_dimensions) + 3)  # Updated to 3 for current item dimensions
         cuboid_flattened = self.cuboid.flatten()
         item_dims = np.array(self.items[self.current_item_index])
         state = np.concatenate((cuboid_flattened, item_dims))
@@ -122,6 +122,7 @@ class Agent:
         next_states = torch.tensor(next_states, dtype=torch.float32)
         dones = torch.tensor(dones, dtype=torch.float32)
 
+        # Fix the gather call to match the output dimensions
         q_values = self.model(states).gather(1, actions.unsqueeze(1)).squeeze()
         next_q_values = self.model(next_states).max(1)[0]
         target_q_values = rewards + self.gamma * next_q_values * (1 - dones)
