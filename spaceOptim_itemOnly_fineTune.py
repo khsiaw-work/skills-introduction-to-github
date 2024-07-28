@@ -267,8 +267,6 @@ def fine_tune_dqn(agent, env, num_episodes, max_items):
         print(f"Fine-tune Episode {episode + 1}, Total Reward: {total_reward}")
 
 
-
-
 # Save the trained model
 def save_model(model, path):
     torch.save(model.state_dict(), path)
@@ -295,39 +293,69 @@ def load_model(model, path, device):
 
 
 
-
-
-
 # Running inference
-def run_inference(env, agent, cuboid_dimensions, items):
+def run_inference(env, agent, cuboid_dimensions, items, max_steps=100):
     env.items = items
     state = env.reset()
     done = False
     positions = []
     rotations = []
+    steps = 0
+
+    # Initialize variables to track the best state
+    best_state = state
+    best_positions = []
+    best_rotations = []
+    best_reward = -float('inf')  # Initialize to a very low value
+    cumulative_reward = 0  # Initialize cumulative reward
+
+    # Track which items have been successfully placed
+    placed_items = set()
     
-    while not done:
+    while not done and steps < max_steps:
         action = agent.select_action(state)
         position, rotation = action
         next_state, reward, done = env.step(action)
-        state = next_state
+        
+        # Check if the item was placed successfully
+        if reward > 0:
+            placed_items.add(env.current_item_index - 1)
+        
         positions.append(position)
         rotations.append(rotation)
+        cumulative_reward += reward
+        
+        # Update the best state if the current cumulative reward is higher
+        if cumulative_reward > best_reward:
+            best_reward = cumulative_reward
+            best_state = state
+            best_positions = list(positions)  # Make a copy of the current positions
+            best_rotations = list(rotations)  # Make a copy of the current rotations
+        
+        state = next_state
+        steps += 1
 
+        # Exit if all items are placed
+        if len(placed_items) >= len(items):
+            done = True
+
+    # If done is False, log that the maximum number of steps was reached
+    if not done:
+        print("Reached the maximum number of steps before completing the task.")
+    
     print("Cuboid dimensions:", cuboid_dimensions)    
-    print("Positions:", positions)
-    print("Rotations:", rotations)
+    print("Best Positions:", best_positions)
+    print("Best Rotations:", best_rotations)
     
     # Convert positions to 3D coordinates
-    coordinates = [np.unravel_index(pos, cuboid_dimensions) for pos in positions]
-    print("3D Coordinates:", coordinates)
+    best_coordinates = [np.unravel_index(pos, cuboid_dimensions) for pos in best_positions]
+    print("Best 3D Coordinates:", best_coordinates)
 
     # Interpret rotations
-    rotated_items = [get_rotations(item)[rot] for item, rot in zip(items, rotations)]
-    print("Rotated Items:", rotated_items)    
+    best_rotated_items = [get_rotations(item)[rot] for item, rot in zip(items, best_rotations)]
+    print("Best Rotated Items:", best_rotated_items)    
 
-
-    return positions, rotations
+    return best_positions, best_rotations
 
 
 # Function to create the vertices for a cuboid
@@ -391,26 +419,26 @@ def plot_cuboid(cuboid_dimensions, items, positions, rotations):
 
 
 
-# Parameters
-cuboid_dimensions = (10, 10, 10)
+# # Parameters
+# cuboid_dimensions = (10, 10, 10)
 num_items = 10
-items = generate_random_items(num_items)
-output_dim = np.prod(cuboid_dimensions)
+# items = generate_random_items(num_items)
+# output_dim = np.prod(cuboid_dimensions)
 
-# Environment and Model
-env = PackingEnvironment(cuboid_dimensions, items)
-model = DQN(cuboid_dimensions, output_dim)
+# # Environment and Model
+# env = PackingEnvironment(cuboid_dimensions, items)
+# model = DQN(cuboid_dimensions, output_dim)
 
-# Agent
-agent = Agent(model, env, training=True)
+# # Agent
+# agent = Agent(model, env, training=True)
 
 # Pretrain the model
-num_pretrain_episodes = 200
-max_items = 6
-pretrain_dqn(agent, env, num_pretrain_episodes, max_items)
+# num_pretrain_episodes = 200
+# max_items = 6
+# pretrain_dqn(agent, env, num_pretrain_episodes, max_items)
 
-# Save the pretrained model
-save_model(model, "pretrained_model.pth")
+# # Save the pretrained model
+# save_model(model, "pretrained_model.pth")
 
 
 # Fine-tune the model with new dimensions
@@ -421,30 +449,32 @@ num_episodes = 50
 # Load the model for fine-tuning
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load the model for fine-tuning
-loaded_model = DQN(cuboid_dimensions, output_dim)
-loaded_model = load_model(loaded_model, "pretrained_model.pth", device)
+# # Load the model for fine-tuning
+# loaded_model = DQN(cuboid_dimensions, output_dim)
+# loaded_model = load_model(loaded_model, "pretrained_model.pth", device)
 
-# Create an agent for fine-tuning
-fine_tune_agent = Agent(loaded_model, env, training=True)
+# # Create an agent for fine-tuning
+# fine_tune_agent = Agent(loaded_model, env, training=True)
 
-# Fine-tune the model with new dimensions
+# # Fine-tune the model with new dimensions
 new_dimensions = (12, 12, 12)
 new_output_dim = np.prod(new_dimensions)
 fine_tune_env = PackingEnvironment(new_dimensions, generate_random_items(num_items))
-fine_tune_agent.env = fine_tune_env  # Update the environment in the agent
+# fine_tune_agent.env = fine_tune_env  # Update the environment in the agent
 
-# Update the model output dimension for the new dimensions
-fine_tune_agent.model = DQN(new_dimensions, new_output_dim).to(device)
+# # Update the model output dimension for the new dimensions
+# fine_tune_agent.model = DQN(new_dimensions, new_output_dim).to(device)
 
-fine_tune_dqn(fine_tune_agent, fine_tune_env, num_episodes, max_items)
+# fine_tune_dqn(fine_tune_agent, fine_tune_env, num_episodes, max_items)
 
-# Save the fine-tuned model
-save_model(fine_tune_agent.model, "fine_tuned_model.pth")
+# # Save the fine-tuned model
+# save_model(fine_tune_agent.model, "fine_tuned_model.pth")
 
 # Load the model for inference
 final_model = DQN(new_dimensions, new_output_dim)
 final_model = load_model(final_model, "fine_tuned_model.pth", device)
+print("Model loaded")
+
 
 # Create an agent for inference
 inference_agent = Agent(final_model, fine_tune_env, training=False)
@@ -452,8 +482,12 @@ inference_agent = Agent(final_model, fine_tune_env, training=False)
 # Define new dimensions and items for inference
 inference_items = [(3, 2, 2), (1, 3, 3), (2, 1, 3)]
 
+print("Pre inference reached")
 # Run inference
-positions, rotations = run_inference(fine_tune_env, inference_agent, new_dimensions, inference_items)
+# positions, rotations = run_inference(fine_tune_env, inference_agent, new_dimensions, inference_items)
+positions, rotations = run_inference(fine_tune_env, inference_agent, new_dimensions, inference_items, max_steps=100000)
+print("Inference finished")
+
 
 # Plot the cuboid with the placed items
 plot_cuboid(new_dimensions, inference_items, positions, rotations)
