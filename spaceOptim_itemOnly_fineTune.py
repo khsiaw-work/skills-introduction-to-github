@@ -26,7 +26,6 @@ def get_rotations(item):
     return rotations
 
 
-# Environment
 class PackingEnvironment:
     def __init__(self, cuboid_dimensions, items):
         self.cuboid_dimensions = cuboid_dimensions
@@ -41,10 +40,10 @@ class PackingEnvironment:
 
     def _get_state(self):
         if self.done or self.current_item_index >= len(self.items):
-            return np.zeros(np.prod(self.cuboid_dimensions) + 3)  # Updated to 3 for current item dimensions
+            return np.zeros(np.prod(self.cuboid_dimensions) + 3 + 3)  # Updated to 3 for current item dimensions and 3 for cuboid dimensions
         cuboid_flattened = self.cuboid.flatten()
         item_dims = np.array(self.items[self.current_item_index])
-        state = np.concatenate((cuboid_flattened, item_dims))
+        state = np.concatenate((cuboid_flattened, item_dims, self.cuboid_dimensions))
         return state
 
     def step(self, position_rotation):
@@ -62,7 +61,7 @@ class PackingEnvironment:
             if self.current_item_index >= len(self.items):
                 self.done = True
         else:
-            reward = -0.5  # Penalty for an invalid placement
+            reward = -0.2  # Penalty for an invalid placement
         
         next_state = self._get_state()
         return next_state, reward, self.done
@@ -84,7 +83,6 @@ class PackingEnvironment:
         self.cuboid[x:x+item_x, y:y+item_y, z:z+item_z] = 1
 
 
-# Enhanced DQN Network with CNN
 class DQN(nn.Module):
     def __init__(self, cuboid_dimensions, output_dim):
         super(DQN, self).__init__()
@@ -99,7 +97,7 @@ class DQN(nn.Module):
         conv_output_size = self._get_conv_output_size(cuboid_dimensions)
 
         # Fully connected layers to process item dimensions and combined state
-        self.fc1 = nn.Linear(conv_output_size + 3, 256)  # Including item dimensions
+        self.fc1 = nn.Linear(conv_output_size + 3 + 3, 256)  # Including item dimensions and cuboid dimensions
         self.fc2 = nn.Linear(256, 512)
         self.fc3 = nn.Linear(512, output_dim * 6)  # 6 possible rotations
 
@@ -112,15 +110,16 @@ class DQN(nn.Module):
         return int(np.prod(output.size()))
 
     def forward(self, x):
-        cuboid_state, item_dims = x[:, :-3], x[:, -3:]
-        cuboid_state = cuboid_state.view(-1, 1, *self.cuboid_dimensions)
+        cuboid_dimensions = self.cuboid_dimensions  # Use the stored cuboid dimensions
+        cuboid_state, item_dims, cuboid_dims = x[:, :-6], x[:, -6:-3], x[:, -3:]
+        cuboid_state = cuboid_state.view(-1, 1, *cuboid_dimensions)
 
         x = F.relu(self.conv1(cuboid_state))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
 
         x = x.view(x.size(0), -1)  # Flatten the output of the convolutional layers
-        x = torch.cat((x, item_dims), dim=1)  # Concatenate with item dimensions
+        x = torch.cat((x, item_dims, cuboid_dims), dim=1)  # Concatenate with item dimensions and cuboid dimensions
 
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -129,8 +128,10 @@ class DQN(nn.Module):
         return x
 
 
+
+
 class Agent:
-    def __init__(self, model, env, lr=0.001, gamma=0.9, epsilon=0.15, batch_size=32, memory_size=1000, training=True):
+    def __init__(self, model, env, lr=0.01, gamma=0.99, epsilon=0.2, batch_size=32, memory_size=1000, training=True):
         self.model = model.to(device)
         self.env = env
         self.training = training
@@ -216,16 +217,81 @@ def train_dqn(agent, env, num_episodes, max_items):
         
         print(f"Episode {episode + 1}, Total Reward: {total_reward}")
 
+def pretrain_dqn(agent, env, num_episodes, max_items):
+    for episode in range(num_episodes):
+        # Randomly select number of items for this episode
+        num_items = np.random.randint(1, max_items + 1)
+        env.items = generate_random_items(num_items)
+        state = env.reset()
+        done = False
+        total_reward = 0
+        
+        # Log the items for this episode
+        print(f"Pretrain Episode {episode + 1}, Training with items: {env.items}")
+        
+        while not done:
+            action = agent.select_action(state)
+            next_state, reward, done = env.step(action)
+            agent.store_transition((state, action, reward, next_state, done))
+            agent.train()
+            state = next_state
+            total_reward += reward
+        
+        print(f"Pretrain Episode {episode + 1}, Total Reward: {total_reward}")
+
+
+def fine_tune_dqn(agent, env, num_episodes, max_items):
+    for episode in range(num_episodes):
+        # Randomly select number of items for this episode
+        num_items = np.random.randint(1, max_items + 1)
+        env.items = generate_random_items(num_items)
+        state = env.reset()
+        done = False
+        total_reward = 0
+        
+        # Log the items for this episode
+        print(f"Fine-tune Episode {episode + 1}, Training with items: {env.items}")
+        
+        while not done:
+            action = agent.select_action(state)
+            next_state, reward, done = env.step(action)
+            agent.store_transition((state, action, reward, next_state, done))
+            agent.train()
+            state = next_state
+            total_reward += reward
+        
+        print(f"Fine-tune Episode {episode + 1}, Total Reward: {total_reward}")
+
+
+
 
 # Save the trained model
 def save_model(model, path):
     torch.save(model.state_dict(), path)
 
-# Load the trained model
-def load_model(model, path):
-    model.load_state_dict(torch.load(path, map_location=device))
+
+def load_model(model, path, device):
+    pretrained_dict = torch.load(path, map_location=device)
+    model_dict = model.state_dict()
+
+    # Check if the fc3 layer needs to be resized
+    if pretrained_dict['fc3.weight'].shape != model_dict['fc3.weight'].shape:
+        # Resize fc3 layer
+        in_features = pretrained_dict['fc3.weight'].shape[1]
+        out_features = pretrained_dict['fc3.weight'].shape[0]
+        model.fc3 = nn.Linear(in_features, out_features).to(device)
+        model_dict = model.state_dict()  # Update model_dict with the new fc3 shape
+
+    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    model.to(device)
     model.eval()
     return model
+
+
+
+
 
 
 # Running inference
@@ -334,28 +400,59 @@ model = DQN(cuboid_dimensions, output_dim)
 # Agent
 agent = Agent(model, env, training=True)
 
-# Train the model
-num_episodes = 100
+# Pretrain the model
+num_pretrain_episodes = 100
 max_items = 6
-train_dqn(agent, env, num_episodes, max_items)
+pretrain_dqn(agent, env, num_pretrain_episodes, max_items)
 
-# Save the trained model
-save_model(model, "trained_model.pth")
+# Save the pretrained model
+save_model(model, "pretrained_model.pth")
+
+
+# Fine-tune the model with new dimensions
+new_dimensions = (12, 12, 12)
+new_output_dim = np.prod(new_dimensions)
+num_episodes = 100
+
+# Load the model for fine-tuning
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load the model for fine-tuning
+# Load the model for fine-tuning
+loaded_model = DQN(cuboid_dimensions, output_dim)
+loaded_model = load_model(loaded_model, "pretrained_model.pth", device)
+
+# Create an agent for fine-tuning
+fine_tune_agent = Agent(loaded_model, env, training=True)
+
+# Fine-tune the model with new dimensions
+new_dimensions = (12, 12, 12)
+new_output_dim = np.prod(new_dimensions)
+fine_tune_env = PackingEnvironment(new_dimensions, generate_random_items(num_items))
+fine_tune_agent.env = fine_tune_env  # Update the environment in the agent
+
+# Update the model output dimension for the new dimensions
+fine_tune_agent.model = DQN(new_dimensions, new_output_dim).to(device)
+
+fine_tune_dqn(fine_tune_agent, fine_tune_env, num_episodes, max_items)
+
+# Save the fine-tuned model
+save_model(fine_tune_agent.model, "fine_tuned_model.pth")
 
 # Load the model for inference
-loaded_model = DQN(cuboid_dimensions, output_dim)
-loaded_model = load_model(loaded_model, "trained_model.pth")
+final_model = DQN(new_dimensions, new_output_dim)
+final_model = load_model(final_model, "fine_tuned_model.pth", device)
 
 # Create an agent for inference
-inference_agent = Agent(loaded_model, env, training=False)
+inference_agent = Agent(final_model, fine_tune_env, training=False)
 
 # Define new dimensions and items for inference
-new_dimensions = (10, 10, 10)
-new_items = [(3, 2, 2), (1, 3, 3), (2, 1, 3)]
-new_env = PackingEnvironment(new_dimensions, new_items)
+inference_items = [(3, 2, 2), (1, 3, 3), (2, 1, 3)]
 
 # Run inference
-positions, rotations = run_inference(new_env, inference_agent, new_dimensions, new_items)
+positions, rotations = run_inference(fine_tune_env, inference_agent, new_dimensions, inference_items)
 
 # Plot the cuboid with the placed items
-plot_cuboid(new_dimensions, new_items, positions, rotations)
+plot_cuboid(new_dimensions, inference_items, positions, rotations)
+
+
