@@ -166,6 +166,9 @@ class Agent:
         batch = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
+        states = np.array(states)
+        next_states = np.array(next_states)
+
         states = torch.tensor(states, dtype=torch.float32).to(device)
         positions = torch.tensor([a[0] for a in actions], dtype=torch.int64).to(device)
         rotations = torch.tensor([a[1] for a in actions], dtype=torch.int64).to(device)
@@ -185,6 +188,7 @@ class Agent:
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
 
 
 def generate_random_items(max_items):
@@ -401,7 +405,7 @@ model = DQN(cuboid_dimensions, output_dim)
 agent = Agent(model, env, training=True)
 
 # Pretrain the model
-num_pretrain_episodes = 100
+num_pretrain_episodes = 200
 max_items = 6
 pretrain_dqn(agent, env, num_pretrain_episodes, max_items)
 
@@ -412,12 +416,11 @@ save_model(model, "pretrained_model.pth")
 # Fine-tune the model with new dimensions
 new_dimensions = (12, 12, 12)
 new_output_dim = np.prod(new_dimensions)
-num_episodes = 100
+num_episodes = 50
 
 # Load the model for fine-tuning
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load the model for fine-tuning
 # Load the model for fine-tuning
 loaded_model = DQN(cuboid_dimensions, output_dim)
 loaded_model = load_model(loaded_model, "pretrained_model.pth", device)
