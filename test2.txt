@@ -5,6 +5,9 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from collections import deque
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
 
 # Helper function to get all rotations of an item
 def get_rotations(item):
@@ -17,6 +20,7 @@ def get_rotations(item):
         (item[2], item[1], item[0])
     ]
     return rotations
+
 
 # Environment
 class PackingEnvironment:
@@ -60,7 +64,7 @@ class PackingEnvironment:
         return next_state, reward, self.done
 
     def _can_place_item(self, position, item):
-        x, y, z = position
+        x, y, z = np.unravel_index(position, self.cuboid_dimensions)
         item_x, item_y, item_z = item
         if (x + item_x > self.cuboid_dimensions[0] or
             y + item_y > self.cuboid_dimensions[1] or
@@ -71,22 +75,54 @@ class PackingEnvironment:
         return True
 
     def _place_item(self, position, item):
-        x, y, z = position
+        x, y, z = np.unravel_index(position, self.cuboid_dimensions)
         item_x, item_y, item_z = item
         self.cuboid[x:x+item_x, y:y+item_y, z:z+item_z] = 1
 
-# DQN Network
+# Enhanced DQN Network with CNN
 class DQN(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, cuboid_dimensions, output_dim):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, output_dim * 6)  # 6 possible rotations
+        self.cuboid_dimensions = cuboid_dimensions
+
+        # Convolutional layers to process cuboid state
+        self.conv1 = nn.Conv3d(1, 32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv3d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv3d(64, 128, kernel_size=3, stride=1, padding=1)
+
+        # Calculate the flattened size after convolutions
+        conv_output_size = self._get_conv_output_size(cuboid_dimensions)
+
+        # Fully connected layers to process item dimensions and combined state
+        self.fc1 = nn.Linear(conv_output_size + 3, 256)  # Including item dimensions
+        self.fc2 = nn.Linear(256, 512)
+        self.fc3 = nn.Linear(512, output_dim * 6)  # 6 possible rotations
+
+    def _get_conv_output_size(self, shape):
+        # Helper function to calculate the size after the convolutional layers
+        dummy_input = torch.zeros(1, 1, *shape)
+        output = self.conv1(dummy_input)
+        output = self.conv2(output)
+        output = self.conv3(output)
+        return int(np.prod(output.size()))
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        cuboid_state, item_dims = x[:, :-3], x[:, -3:]
+        cuboid_state = cuboid_state.view(-1, 1, *self.cuboid_dimensions)
+
+        x = F.relu(self.conv1(cuboid_state))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+
+        x = x.view(x.size(0), -1)  # Flatten the output of the convolutional layers
+        x = torch.cat((x, item_dims), dim=1)  # Concatenate with item dimensions
+
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+
+        return x
+
 
 # Agent
 class Agent:
@@ -101,10 +137,15 @@ class Agent:
 
     def select_action(self, state):
         if random.random() < self.epsilon:
-            return (random.randint(0, np.prod(self.env.cuboid_dimensions) - 1), random.randint(0, 5))
+            position = random.randint(0, np.prod(self.env.cuboid_dimensions) - 1)
+            rotation = random.randint(0, 5)
+            return (position, rotation)
         state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
         q_values = self.model(state)
-        return divmod(q_values.argmax().item(), 6)  # Adjust to get position and rotation
+        action = q_values.argmax().item()
+        position = action // 6  # Integer division to get the position index
+        rotation = action % 6  # Modulus to get the rotation index
+        return (position, rotation)
 
     def store_transition(self, transition):
         self.memory.append(transition)
@@ -117,160 +158,54 @@ class Agent:
         states, actions, rewards, next_states, dones = zip(*batch)
 
         states = torch.tensor(states, dtype=torch.float32)
-        actions = torch.tensor(actions, dtype=torch.int64)  # Ensure actions are int64
+        positions = torch.tensor([a[0] for a in actions], dtype=torch.int64)
+        rotations = torch.tensor([a[1] for a in actions], dtype=torch.int64)
         rewards = torch.tensor(rewards, dtype=torch.float32)
         next_states = torch.tensor(next_states, dtype=torch.float32)
         dones = torch.tensor(dones, dtype=torch.float32)
 
-        # Split actions into position and rotation
-        positions = actions[:, 0]  # First part is the position index
-        rotations = actions[:, 1]   # Second part is the rotation index
+        q_values = self.model(states)
+        next_q_values = self.model(next_states)
 
-        # Gather Q-values for the selected positions and rotations
-        q_values = self.model(states).view(-1, 6)  # Reshape to (batch_size, output_dim * 6)
-        q_values_selected = q_values.gather(1, rotations.unsqueeze(1)).squeeze()  # Gather based on rotation
+        q_value = q_values[range(self.batch_size), positions * 6 + rotations]
+        next_q_value = next_q_values.max(1)[0]
+        expected_q_value = rewards + self.gamma * next_q_value * (1 - dones)
 
-        # Calculate next Q-values
-        next_q_values = self.model(next_states).view(-1, 6)  # Ensure the shape is (batch_size, 6)
-        max_next_q_values = next_q_values.max(1)[0]  # Get max Q-values for next states
+        loss = F.mse_loss(q_value, expected_q_value)
 
-        # Calculate target Q-values
-        target_q_values = rewards + self.gamma * max_next_q_values * (1 - dones)
-
-        # Compute loss
-        loss = F.mse_loss(q_values_selected, target_q_values)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
 
-    # def train(self):
-    #     if len(self.memory) < self.batch_size:
-    #         return
+# Training loop
+def train_dqn(agent, env, num_episodes):
+    for episode in range(num_episodes):
+        state = env.reset()
+        done = False
+        total_reward = 0
         
-    #     batch = random.sample(self.memory, self.batch_size)
-    #     states, actions, rewards, next_states, dones = zip(*batch)
+        while not done:
+            action = agent.select_action(state)
+            next_state, reward, done = env.step(action)
+            agent.store_transition((state, action, reward, next_state, done))
+            agent.train()
+            state = next_state
+            total_reward += reward
+        
+        print(f"Episode {episode + 1}, Total Reward: {total_reward}")
 
-    #     states = torch.tensor(states, dtype=torch.float32)
-    #     actions = torch.tensor(actions, dtype=torch.int64)  # Ensure actions are int64
-    #     rewards = torch.tensor(rewards, dtype=torch.float32)
-    #     next_states = torch.tensor(next_states, dtype=torch.float32)
-    #     dones = torch.tensor(dones, dtype=torch.float32)
 
-    #     # Fix the gather call to match the output dimensions
-    #     q_values = self.model(states).gather(1, actions.unsqueeze(1)).squeeze()
-    #     next_q_values = self.model(next_states).max(1)[0]
-    #     target_q_values = rewards + self.gamma * next_q_values * (1 - dones)
-
-    #     loss = F.mse_loss(q_values, target_q_values)
-    #     self.optimizer.zero_grad()
-    #     loss.backward()
-    #     self.optimizer.step()
-
-# Example items and cuboid dimensions
+# Define cuboid dimensions and items
 cuboid_dimensions = (10, 10, 10)
-items = [(2, 2, 2), (3, 2, 1), (1, 1, 1)]  # Variable number of items
+items = [(2, 2, 2), (3, 3, 3), (4, 4, 4)]
 
+# Create environment and model
 env = PackingEnvironment(cuboid_dimensions, items)
+model = DQN(cuboid_dimensions, np.prod(cuboid_dimensions))
 
-# Define the network dimensions
-input_dim = np.prod(cuboid_dimensions) + 3  # Cuboid state + item dimensions
-output_dim = np.prod(cuboid_dimensions)  # Possible positions
-model = DQN(input_dim, output_dim)
-
-# Initialize the agent
+# Create agent
 agent = Agent(model, env)
 
-# Training loop
-num_episodes = 1000
-
-for episode in range(num_episodes):
-    state = env.reset()
-    total_reward = 0
-    done = False
-
-    while not done:
-        action = agent.select_action(state)
-        position = np.unravel_index(action[0], env.cuboid_dimensions)
-        next_state, reward, done = env.step((position, action[1]))
-        agent.store_transition((state, action, reward, next_state, done))
-        agent.train()
-        state = next_state
-        total_reward += reward
-
-    print(f"Episode {episode+1}: Total Reward: {total_reward}")
-
-print("Training finished.")
-
-# Save the model
-torch.save(model.state_dict(), 'dqn_model.pth')
-
-# Load the model (Optional)
-model = DQN(input_dim, output_dim)
-model.load_state_dict(torch.load('dqn_model.pth'))
-model.eval()
-
-# Run inference
-def run_inference(env, model):
-    state = env.reset()
-    total_reward = 0
-    done = False
-    positions_rotations = []
-
-    while not done:
-        state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
-        q_values = model(state_tensor)
-        action = q_values.argmax().item()
-        position_rotation = divmod(action, 6)
-        position = np.unravel_index(position_rotation[0], env.cuboid_dimensions)
-        positions_rotations.append((position, position_rotation[1]))
-        next_state, reward, done = env.step((position, position_rotation[1]))
-        state = next_state
-        total_reward += reward
-
-    return total_reward, positions_rotations
-
-# Test with a new set of items and cuboid dimensions
-new_items = [(2, 3, 1), (4, 2, 2), (1, 2, 1), (3, 3, 1)]
-new_cuboid_dimensions = (10, 10, 10)
-new_env = PackingEnvironment(new_cuboid_dimensions, new_items)
-
-inference_reward, positions_rotations = run_inference(new_env, model)
-print(f"Inference Total Reward: {inference_reward}")
-print(f"Positions and Rotations: {positions_rotations}")
-
-
-def create_cuboid_vertices(start, size):
-    x, y, z = start
-    dx, dy, dz = size
-
-    vertices = [
-        [(x, y, z), (x+dx, y, z), (x+dx, y+dy, z), (x, y+dy, z)], # Bottom
-        [(x, y, z+dz), (x+dx, y, z+dz), (x+dx, y+dy, z+dz), (x, y+dy, z+dz)], # Top
-        [(x, y, z), (x, y, z+dz), (x, y+dy, z+dz), (x, y+dy, z)],
-        [(x+dx, y, z), (x+dx, y, z+dz), (x+dx, y+dy, z+dz), (x+dx, y+dy, z)],
-        [(x, y, z), (x+dx, y, z), (x+dx, y, z+dz), (x, y, z+dz)],
-        [(x, y+dy, z), (x+dx, y+dy, z), (x+dx, y+dy, z+dz), (x, y+dy, z+dz)]
-    ]
-    return vertices
-
-
-def plot_cuboid(cuboid_dimensions, items, positions):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-
-    for item, position in zip(items, positions):
-        vertices = create_cuboid_vertices(position, item)
-        cuboid = Poly3DCollection(vertices, alpha=0.25, linewidth=1, edgecolors='r')
-        cuboid.set_facecolor((np.random.rand(), np.random.rand(), np.random.rand(), 0.1))
-        ax.add_collection3d(cuboid)
-
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-
-    ax.set_xlim(0, cuboid_dimensions[0])
-    ax.set_ylim(0, cuboid_dimensions[1])
-    ax.set_zlim(0, cuboid_dimensions[2])
-
-    plt.show()
+# Train the agent
+train_dqn(agent, env, num_episodes=10)
