@@ -1,0 +1,117 @@
+"""
+5 inputs to change:
+- input_path
+- output_path
+- mask_loc: To wherever the Malaysia border file is in order to extract Malaysia only data
+- field_name 
+- worksheet_name
+"""
+
+
+
+# Accessing each group and finding the Global map group 
+groups_dict = QgsProject.instance().layerTreeRoot().children()
+layer_names = [layer.name() for layer in groups_dict]
+
+# Would not need this part if initially not grouped
+glob_index = [i for i, ele in enumerate(layer_names) if ele == 'Global'][0]
+glob_group = groups_dict[glob_index].children()
+
+mask_output_locs = []
+# Extraction process
+for layer in glob_group:
+    layer_name = layer.name()
+
+    # Initial raster layer that should be loaded into the QGIS
+    input_path = 'E:/Coding/Jupyter codes/KPMG TESTING/Riverine RCP 4.5/NorESM1/2030/'
+    input_loc = input_path + layer_name + '.tif'
+
+    # Output location (Path input needed): Malaysia only raster layer
+    output_path = 'E:/Coding/Jupyter codes/KPMG TESTING/To be sorted/2030 Riverine NorESM1 RCP 4.5/'
+    mask_output_loc = output_path + '(Msia)_' + layer_name + '.tif'
+    mask_output_locs.append(mask_output_loc)
+    
+    # Mask layer: Malaysia border
+    mask_loc = 'E:/Coding/Jupyter codes/KPMG TESTING/GADM malaysia/gadm41_MYS_2.shp'
+
+    # 01 Masking process parameters
+    mask_params = {
+        'ALPHA_BAND' : False, 'CROP_TO_CUTLINE' : True, 
+        'DATA_TYPE' : 0, 'EXTRA' : '', 
+        'INPUT' : input_loc, 
+        'KEEP_RESOLUTION' : True, 
+        'MASK' : mask_loc, 
+        'MULTITHREADING' : False, 'NODATA' : None, 'OPTIONS' : '', 
+        'OUTPUT' : mask_output_loc, 
+        'SET_RESOLUTION' : False, 'SOURCE_CRS' : None, 
+        'TARGET_CRS' : None,  'TARGET_EXTENT' : None, 
+        'X_RESOLUTION' : None, 'Y_RESOLUTION' : None 
+    }
+
+    # Initiate masking process
+    processing.run("gdal:cliprasterbymasklayer", mask_params)
+
+
+
+vect_geom_paths = []
+for i, layer in enumerate(glob_group):
+    layer_name = layer.name()    
+    # 02 Conversion from raster pixels to points
+    layer_name_splited = layer_name.split('_')
+    crucial_id = layer_name_splited[3:]
+    print(crucial_id)
+    crucial_id = [x.replace('rp','') for x in crucial_id]
+    print(crucial_id)
+
+    if len(layer_name_splited) <= 6:
+        year_id, ari_id, perc_id = crucial_id[0][-2:], crucial_id[1], ''
+        print(year_id, ari_id, perc_id)
+    else:
+        year_id, ari_id, perc_id = crucial_id[0][-2:], crucial_id[1], crucial_id[-1]
+        print(year_id, ari_id, perc_id)
+
+    # Output vector file (Path and filed name input needed)
+    vect_path = output_path
+    field_name = 'RNorESM1RCP45' + year_id + ari_id + perc_id
+    vect_loc = vect_path + field_name + '.gpkg'
+#     vect_locs.append(vect_loc)
+
+    # Conversion parameters
+    conv_params = { 
+        'FIELD_NAME' : field_name, 
+        'INPUT_RASTER' : mask_output_locs[i],
+        'OUTPUT' : vect_loc, 
+        'RASTER_BAND' : 1
+    }
+
+    # Initiate conversion process
+    processing.run("native:pixelstopoints", conv_params)
+
+
+    # 03 Adding geometry attributes
+    vect_geom_added = vect_loc[:-5] + 'V.gpkg'
+    vect_geom_paths.append(vect_geom_added)
+    
+    add_geom_params = { 
+        'CALC_METHOD' : 0, 
+        'INPUT' : vect_loc, 
+        'OUTPUT' : vect_geom_added
+    }
+
+    processing.run("qgis:exportaddgeometrycolumns", add_geom_params)
+
+
+    
+# 04 Export to worksheet (Need to change worksheet_name)    
+worksheet_path = 'E:/Coding/Jupyter codes/KPMG TESTING/Exported worksheets/'    
+worksheet_name = "Riverine_NorESM1_RCP4.5_2030.xlsx"
+worksheet_file = worksheet_path + worksheet_name
+
+export_params ={ 
+    'FORMATTED_VALUES' : False, 
+    'LAYERS' : vect_geom_paths,
+    'OUTPUT' : worksheet_file, 
+    'OVERWRITE' : True, 
+    'USE_ALIAS' : False }
+
+processing.run("native:exporttospreadsheet", export_params)
